@@ -1,0 +1,6 @@
+# sensitive / runtime files (never commit)
+config.json
+sso-cookies.json
+signin.log
+chrome-profile/
+*.log
