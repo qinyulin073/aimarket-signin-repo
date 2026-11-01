@@ -220,6 +220,16 @@ function Invoke-SignFlow {
   } catch {
     $code = Get-BodyCode $_
     if ($code -eq 40201 -or $code -eq 40202 -or $code -eq 40200) { return @{ status = 'TOKEN_BAD' } }
+    # transient 4xx (e.g. captcha/security-check): recheck status before failing;
+    # a concurrent sign-in (phone/web) may have signed us in during the race
+    try {
+      $re = Invoke-RestMethod -Method Get -Uri ($baseUrl + '/api/task-award/sign-status') -Headers (New-Headers $t) -TimeoutSec 30
+      if ([int]$re.code -eq 20000 -and $re.data -and $re.data.signedToday) {
+        Write-Log ('sign request failed (' + $_.Exception.Message + ') but status now shows signedToday - treating as signed.')
+        $awarded = if ($null -ne $re.data.awarded) { [int64]$re.data.awarded } else { [int64]$re.data.signAward }
+        return @{ status = 'OK_DONE'; granted = $false; awardedToday = $awarded }
+      }
+    } catch { }
     Write-Log ('sign request failed: ' + $_.Exception.Message)
     return @{ status = 'FAIL' }
   }
