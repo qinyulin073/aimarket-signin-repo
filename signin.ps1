@@ -198,6 +198,32 @@ function Invoke-SignFlow {
   } catch {
     $code = Get-BodyCode $_
     if ($code -eq 40201 -or $code -eq 40202 -or $code -eq 40200) { return @{ status = 'TOKEN_BAD' } }
+    if ($code -eq 40000) {
+      # platform enabled Cap.js captcha on the sign endpoint (since 2026-11-01);
+      # fall back to clicking the real button in Chrome so the site's own captcha flow runs
+      Write-Log 'sign request blocked by captcha (code 40000), trying browser sign-in...'
+      $bs = Invoke-BrowserSign -visible $false
+      if (-not $bs) { $bs = Invoke-BrowserSign -visible $true }
+      if ($bs -and $bs.ok) {
+        if ($bs.already) {
+          Write-Log 'browser sign: already signed today.'
+          $awarded = if ($null -ne $d.signAward) { [int64]$d.signAward } else { $null }
+          return @{ status = 'OK_DONE'; granted = $false; awardedToday = $awarded; browserBalance = $bs.balance }
+        }
+        $awarded = if ($bs.awarded) { [int64]$bs.awarded } elseif ($null -ne $d.signAward) { [int64]$d.signAward } else { $null }
+        Write-Log ('browser sign OK, awarded ' + $awarded + ' points.')
+        return @{ status = 'OK_DONE'; granted = $true; awardedToday = $awarded; browserBalance = $bs.balance }
+      }
+      try {
+        $re = Invoke-RestMethod -Method Get -Uri ($baseUrl + '/api/task-award/sign-status') -Headers (New-Headers $t) -TimeoutSec 30
+        if ([int]$re.code -eq 20000 -and $re.data -and $re.data.signedToday) {
+          Write-Log 'captcha fallback failed but status shows signedToday.'
+          $awarded = if ($null -ne $re.data.awarded) { [int64]$re.data.awarded } else { [int64]$re.data.signAward }
+          return @{ status = 'OK_DONE'; granted = $false; awardedToday = $awarded }
+        }
+      } catch { }
+      return @{ status = 'FAIL' }
+    }
     Write-Log ('sign-status request failed: ' + $_.Exception.Message)
     return @{ status = 'FAIL' }
   }
@@ -255,6 +281,29 @@ function Get-Balance([string]$t) {
   return $null
 }
 
+function Invoke-BrowserSign {
+  param([bool]$visible = $false)
+  $node = Find-Node
+  if (-not $node) { Write-Log 'browser sign skipped: node.exe not found.'; return $null }
+  $js = Join-Path $PSScriptRoot 'sign-via-browser.js'
+  if (-not (Test-Path -LiteralPath $js)) { Write-Log 'sign-via-browser.js missing.'; return $null }
+  if ($visible) { $wargs = @($js, '--visible', '--wait', '180'); Write-Log 'opening browser for captcha sign-in (visible)...' }
+  else { $wargs = @($js, '--wait', '60'); Write-Log 'trying browser-based sign-in (headless)...' }
+  $out = & $node @wargs 2>&1
+  $code = $LASTEXITCODE
+  $json = $null
+  foreach ($line in @($out)) {
+    try { $j = $line | ConvertFrom-Json; if ($null -ne $j.ok) { $json = $j; break } } catch {}
+  }
+  if ($json -and $json.ok) {
+    if ($json.already) { return @{ ok = $true; already = $true; awarded = $null; balance = $null } }
+    return @{ ok = $true; already = $false; awarded = $json.awarded; balance = $json.balance }
+  }
+  if ($code -eq 1) { return @{ ok = $true; already = $true; awarded = $null; balance = $null } }
+  Write-Log ('browser sign failed (exit ' + $code + '): ' + (($out | Select-Object -Last 3) -join ' | '))
+  return $null
+}
+
 $outcome = Invoke-SignFlow $token
 if ($outcome.status -eq 'TOKEN_BAD' -and -not $NoRenew) {
   Write-Log 'server rejected the token; renewing once and retrying...'
@@ -270,7 +319,8 @@ if ($outcome.status -eq 'TOKEN_BAD' -and -not $NoRenew) {
 }
 
 if ($outcome.status -eq 'OK_DONE' -and -not $Status) {
-  $balance = Get-Balance $token
+  $balance = $outcome.browserBalance
+  if (-not $balance) { $balance = Get-Balance $token }
   $balanceTxt = if ($null -ne $balance) { '，当前余额 ' + $balance + ' 积分' } else { '' }
   if ($outcome.granted) {
     $msg = '今日签到成功，获得 ' + $outcome.awardedToday + ' 积分' + $balanceTxt

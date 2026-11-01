@@ -29,6 +29,11 @@ renew-token.js（无头 Chrome）
 - 令牌（JWT）有效期 8 小时，每次运行都会自动续
 - 企业微信 SSO 会话（Cookie）有效期很长（约一年），期间无需扫码
 - SSO 会话彻底失效时，计划任务会自动弹窗让你扫一次码
+- **签到验证码兜底**：平台 2026-11-01 起在签到接口启用了 Cap.js 反机器人验证，
+  直接调用 API 可能被拒（HTTP 400 `请完成安全验证后重试`）。遇到这种情况，
+  脚本会自动降级为：在专用 Chrome 里打开真实签到页面、模拟点击签到按钮，
+  让网站自己的验证码（Cap.js WASM 挑战）在浏览器里正常跑完。先无头模式尝试，
+  如果失败会弹出一个可见的 Chrome 窗口（与 SSO 扫码类似，跑完自动关闭）。
 
 ## 环境要求
 
@@ -104,6 +109,7 @@ renew-token.js（无头 Chrome）
 ```
 signin.ps1          签到主脚本（续期调度 + 签到 + Windows 通知）
 renew-token.js      令牌静默续期（无头 Chrome + 企业微信 SSO，纯 Node 内置模块）
+sign-via-browser.js 验证码兜底：在 Chrome 里点击真实签到按钮（CDP，纯 Node 内置模块）
 register-task.ps1   注册/删除 Windows 计划任务（或启动文件夹方案）
 login-once.cmd      一次性扫码登录入口
 run-signin.cmd      手动跑一次入口
