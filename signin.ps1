@@ -198,6 +198,28 @@ function Invoke-SignFlow {
   } catch {
     $code = Get-BodyCode $_
     if ($code -eq 40201 -or $code -eq 40202 -or $code -eq 40200) { return @{ status = 'TOKEN_BAD' } }
+    Write-Log ('sign-status request failed: ' + $_.Exception.Message)
+    return @{ status = 'FAIL' }
+  }
+  $d = $st.data
+  if ($null -eq $d -or [int]$st.code -ne 20000) {
+    Write-Log ('unexpected sign-status response: ' + ($st | ConvertTo-Json -Compress))
+    return @{ status = 'FAIL' }
+  }
+  if (-not $d.enabled) { Write-Log 'sign-in task is disabled on the server. Nothing to do.'; return @{ status = 'OK_NONE' } }
+  if ($d.signedToday) {
+    Write-Log ('already signed today (award ' + $d.signAward + ').')
+    if ($Status) { Write-Host ($d | ConvertTo-Json -Compress) }
+    $awarded = if ($null -ne $d.awarded) { [int64]$d.awarded } else { [int64]$d.signAward }
+    return @{ status = 'OK_DONE'; granted = $false; awardedToday = $awarded }
+  }
+  if ($Status) { Write-Host ($d | ConvertTo-Json -Compress); return @{ status = 'OK_STATUS' } }
+
+  try {
+    $sg = Invoke-RestMethod -Method Post -Uri ($baseUrl + '/api/task-award/sign') -Headers (New-Headers $t) -TimeoutSec 30 -ContentType 'application/json'
+  } catch {
+    $code = Get-BodyCode $_
+    if ($code -eq 40201 -or $code -eq 40202 -or $code -eq 40200) { return @{ status = 'TOKEN_BAD' } }
     if ($code -eq 40000) {
       # platform enabled Cap.js captcha on the sign endpoint (since 2026-11-01);
       # fall back to clicking the real button in Chrome so the site's own captcha flow runs
@@ -224,28 +246,6 @@ function Invoke-SignFlow {
       } catch { }
       return @{ status = 'FAIL' }
     }
-    Write-Log ('sign-status request failed: ' + $_.Exception.Message)
-    return @{ status = 'FAIL' }
-  }
-  $d = $st.data
-  if ($null -eq $d -or [int]$st.code -ne 20000) {
-    Write-Log ('unexpected sign-status response: ' + ($st | ConvertTo-Json -Compress))
-    return @{ status = 'FAIL' }
-  }
-  if (-not $d.enabled) { Write-Log 'sign-in task is disabled on the server. Nothing to do.'; return @{ status = 'OK_NONE' } }
-  if ($d.signedToday) {
-    Write-Log ('already signed today (award ' + $d.signAward + ').')
-    if ($Status) { Write-Host ($d | ConvertTo-Json -Compress) }
-    $awarded = if ($null -ne $d.awarded) { [int64]$d.awarded } else { [int64]$d.signAward }
-    return @{ status = 'OK_DONE'; granted = $false; awardedToday = $awarded }
-  }
-  if ($Status) { Write-Host ($d | ConvertTo-Json -Compress); return @{ status = 'OK_STATUS' } }
-
-  try {
-    $sg = Invoke-RestMethod -Method Post -Uri ($baseUrl + '/api/task-award/sign') -Headers (New-Headers $t) -TimeoutSec 30 -ContentType 'application/json'
-  } catch {
-    $code = Get-BodyCode $_
-    if ($code -eq 40201 -or $code -eq 40202 -or $code -eq 40200) { return @{ status = 'TOKEN_BAD' } }
     # transient 4xx (e.g. captcha/security-check): recheck status before failing;
     # a concurrent sign-in (phone/web) may have signed us in during the race
     try {
