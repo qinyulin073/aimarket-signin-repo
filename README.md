@@ -1,4 +1,4 @@
-﻿# aimarket-signin
+# aimarket-signin
 
 元筑AI集市（aimarket.hncig.cn）每日自动签到工具。
 
@@ -34,7 +34,7 @@ renew-token.js（无头 Chrome）
   自动降级为 `sign-via-browser.js`：在专用 Chrome（无头后台）里打开真实签到页面、
   点击真实签到按钮，让网站自己的验证码跑完。**成功与否以 `/api/task-award/sign-status`
   为准**（验证码解算可能比页面上的提示文字更久，只看网页容易误判成失败）。
-  整个兜底通常 15～40 秒；只有无头模式确实没签成时，才会再弹一个可见 Chrome 窗口
+  无头模式给验证码 60 秒解算上限（一签成立刻结束并关掉浏览器）；只有无头确实没签成时，才会再弹一个可见 Chrome 窗口
   重试一次（与 SSO 扫码类似，跑完自动关闭）。触发兜底时会先弹一条通知告知你正在后台处理。
 
 ## 环境要求
@@ -104,7 +104,7 @@ renew-token.js（无头 Chrome）
 | `session expired: … must be confirmed once` | SSO 会话失效 | 双击 `login-once.cmd` 重新扫码 |
 | `renewal failed (exit 3): cdp-unreachable` | 专用 Chrome 被占用 | 关掉残留的专用 Chrome 窗口后重试 |
 | `sign-status request failed: …` | 网络/服务异常 | 稍后自动重试（计划任务只跑一次，可手动 `run-signin.cmd` 补签） |
-| `sign request blocked by captcha (code 40000)` | 平台验证码兜底已启动 | 正常，等 15～40 秒；会先弹通知 |
+| `sign request blocked by captcha (code 40000)` | 平台验证码兜底已启动 | 正常，后台最多 60 秒；会先弹通知 |
 | `browser sign: already signed today.` | 兜底时当天已被签到 | 无 |
 | `sign-button-not-found` | 页面改版或登录态失效 | 双击 `login-once.cmd` 重新扫码后再跑 |
 | 通知不弹 | 系统通知权限被关 | Windows 设置 → 系统 → 通知，允许 PowerShell |
