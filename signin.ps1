@@ -224,6 +224,7 @@ function Invoke-SignFlow {
       # platform enabled Cap.js captcha on the sign endpoint (since 2026-11-01);
       # fall back to clicking the real button in Chrome so the site's own captcha flow runs
       Write-Log 'sign request blocked by captcha (code 40000), trying browser sign-in...'
+      Show-Toast -Title '元筑AI集市自动签到' -Message '签到遇到平台验证码，正在后台自动完成，约需 1-2 分钟'
       $bs = Invoke-BrowserSign -visible $false
       if (-not $bs) { $bs = Invoke-BrowserSign -visible $true }
       if ($bs -and $bs.ok) {
@@ -287,8 +288,8 @@ function Invoke-BrowserSign {
   if (-not $node) { Write-Log 'browser sign skipped: node.exe not found.'; return $null }
   $js = Join-Path $PSScriptRoot 'sign-via-browser.js'
   if (-not (Test-Path -LiteralPath $js)) { Write-Log 'sign-via-browser.js missing.'; return $null }
-  if ($visible) { $wargs = @($js, '--visible', '--wait', '180'); Write-Log 'opening browser for captcha sign-in (visible)...' }
-  else { $wargs = @($js, '--wait', '60'); Write-Log 'trying browser-based sign-in (headless)...' }
+  if ($visible) { $wargs = @($js, '--visible'); Write-Log 'opening a browser window for captcha sign-in...' }
+  else { $wargs = @($js); Write-Log 'solving captcha in a background browser (about 1 minute, no window)...' }
   $out = & $node @wargs 2>&1
   $code = $LASTEXITCODE
   $json = $null
