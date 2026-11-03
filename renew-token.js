@@ -41,6 +41,17 @@ try { cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8")); } catch {}
 const baseUrl    = (cfg.baseUrl || "https://aimarket.hncig.cn:4090").replace(/\/+$/, "");
 const profileDir = cfg.profileDir || path.join(scriptDir, "chrome-profile");
 
+// The portal's SSO callback currently returns to the :4090 origin, but the admin
+// says it will move to the portless one. Both are the same site and the session
+// cookie is scoped to .hncig.cn, so match on hostname only: a strict baseUrl
+// prefix test would read a successful bounce as "still away" and wrongly demand
+// a QR scan after that switch.
+const siteHost = (() => { try { return new URL(baseUrl).hostname; } catch { return ""; } })();
+function onSite(href) {
+  if (typeof href !== "string") return false;
+  try { return new URL(href).hostname === siteHost; } catch { return false; }
+}
+
 function log(o) { console.log(typeof o === "string" ? o : JSON.stringify(o)); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -168,7 +179,7 @@ const TOKEN_EXPR = [
   for (let i = 0; i < 30; i++) {
     await sleep(800);
     const href = await evalJs("location.href", false);
-    if (typeof href === "string" && href.startsWith(baseUrl)) {
+    if (onSite(href)) {
       oldToken = (await evalJs(TOKEN_EXPR)) || "";
       break;
     }
@@ -198,7 +209,7 @@ const TOKEN_EXPR = [
       if (sawQrPage && !visible) { break; }
       continue;
     }
-    if (typeof href === "string" && href.startsWith(baseUrl)) {
+    if (onSite(href)) {
       const t = (await evalJs(TOKEN_EXPR)) || "";
       if (t && t !== oldToken && jwtExpSec(t) * 1000 > Date.now() + 60 * 1000) { newToken = t; break; }
       if (t && t === oldToken && jwtExpSec(t) * 1000 > Date.now() + 5 * 60 * 1000) { newToken = t; break; }
