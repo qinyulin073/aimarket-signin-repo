@@ -22,7 +22,7 @@
   * Token lifetime is 8 hours, so the daily run refreshes it automatically.
 #>
 param(
-  [string]$At   = '08:10',
+  [string]$At   = '08:00',
   [string]$Name = 'AimarketDailySignIn',
   [switch]$StartupFolder,
   [switch]$Remove

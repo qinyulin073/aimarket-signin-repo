@@ -12,7 +12,7 @@
 ## 工作原理
 
 ```
-计划任务（默认 08:10）
+计划任务（默认 08:00）
    │
    ▼
 signin.ps1 ── 令牌还有效？──── 否 ──► renew-token.js（无头 Chrome）
@@ -84,7 +84,7 @@ GET /api/task-award/sign-status
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File register-task.ps1
    ```
-   - 默认每天 08:10；改时间加 `-At 09:30`
+   - 默认每天 08:00；改时间加 `-At 09:30`
    - 若提示“拒绝访问”，改用管理员 PowerShell 再运行，或用免管理员方案 `-StartupFolder`（每次登录跑一次）
 5. 验证：
    ```powershell
