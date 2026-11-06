@@ -352,7 +352,7 @@ function Invoke-BrowserSign {
   $js = Join-Path $PSScriptRoot 'sign-via-browser.js'
   if (-not (Test-Path -LiteralPath $js)) { Write-Log 'sign-via-browser.js missing.'; return $null }
   if ($visible) { $wargs = @('--visible'); Write-Log 'opening a browser window for the captcha (visible windows solve it, usually under 20 seconds)...' }
-  else { $wargs = @(); Write-Log 'solving the captcha in a background browser (no window, giving it ~35 seconds)...' }
+  else { $wargs = @(); Write-Log 'solving the captcha in a background browser (no window, up to ~20 seconds)...' }
 
   # Stream Chrome's progress lines instead of collecting them until the child
   # exits: previously the log stayed silent for a full minute, which looked like

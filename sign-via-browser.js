@@ -54,10 +54,11 @@ const visible = hasFlag("--visible");
 // so the plumbing (Chrome + CDP + injection + button scan) can be tested
 // without signing.
 const skipPre = hasFlag("--skip-precheck");
-// Headless click works, but in practice Cap.js almost never solves without a
-// visible window, so headless gets a short solve budget and the caller moves
-// on to --visible quickly instead of leaving the user waiting.
-const waitSec = Number(argValue('--wait', visible ? 90 : 25));
+// Headless click works, but on 11-02/04/05/06 Cap.js never solved in headless
+// even with a 60s budget, while a visible window solved in 8-20s. So headless
+// gets only a token budget: enough for the occasional easy solve, short enough
+// that the window appears quickly when it really is needed.
+const waitSec = Number(argValue('--wait', visible ? 90 : 15));
 // How long to look for the button on one origin before trying the next.
 const clickSec = Number(argValue('--click', visible ? 30 : 20));
 const port = Number(argValue("--port", 9336));
