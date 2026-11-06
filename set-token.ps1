@@ -5,7 +5,7 @@
 #>
 param(
   [string]$Token,
-  [string]$BaseUrl = 'https://aimarket.hncig.cn:4090',
+  [string]$BaseUrl = 'https://aimarket.hncig.cn',
   [string]$ConfigPath = (Join-Path $PSScriptRoot 'config.json')
 )
 $ErrorActionPreference = 'Stop'
@@ -15,8 +15,14 @@ if ($Token.StartsWith('Bearer ')) { $Token = $Token.Substring(7).Trim() }
 if ($Token -match '%') { $Token = [uri]::UnescapeDataString($Token) }
 if (-not $Token) { Write-Host 'No token given, nothing saved.' -ForegroundColor Red; exit 1 }
 
+# Write WITHOUT a BOM: renew-token.js and sign-via-browser.js JSON.parse this
+# file, and Set-Content -Encoding UTF8 on PowerShell 5.1 adds a BOM that makes
+# JSON.parse throw "Unexpected token \ufeff".
 @{ baseUrl = $BaseUrl.TrimEnd('/'); token = $Token; setAt = (Get-Date).ToString('s') } |
-  ConvertTo-Json | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+  ConvertTo-Json | ForEach-Object {
+    [IO.File]::WriteAllText($ConfigPath, $_, (New-Object Text.UTF8Encoding($false)))
+  }
 Write-Host ('Token saved to ' + $ConfigPath) -ForegroundColor Green
 Write-Host 'Verifying with a status query...'
-& (Join-Path $PSScriptRoot 'signin.ps1') -Status
+# Verify the file we just wrote, not whatever the default path happens to hold.
+& (Join-Path $PSScriptRoot 'signin.ps1') -Status -ConfigPath $ConfigPath

@@ -38,14 +38,14 @@ const scriptDir = __dirname;
 const cfgPath   = path.join(scriptDir, "config.json");
 let cfg = {};
 try { cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8")); } catch {}
-const baseUrl    = (cfg.baseUrl || "https://aimarket.hncig.cn:4090").replace(/\/+$/, "");
+const baseUrl    = (cfg.baseUrl || "https://aimarket.hncig.cn").replace(/\/+$/, "");
 const profileDir = cfg.profileDir || path.join(scriptDir, "chrome-profile");
 
-// The portal's SSO callback currently returns to the :4090 origin, but the admin
-// says it will move to the portless one. Both are the same site and the session
-// cookie is scoped to .hncig.cn, so match on hostname only: a strict baseUrl
-// prefix test would read a successful bounce as "still away" and wrongly demand
-// a QR scan after that switch.
+// The portal's SSO callback can land on either the portless origin or the old
+// :4090 one (it moved to portless on 2026-11-06), and the bounce may keep the
+// port we started from. Both are the same site and the session cookie is scoped
+// to .hncig.cn, so match on hostname only: a strict baseUrl prefix test would
+// read a successful bounce as "still away" and wrongly demand a QR scan.
 const siteHost = (() => { try { return new URL(baseUrl).hostname; } catch { return ""; } })();
 function onSite(href) {
   if (typeof href !== "string") return false;

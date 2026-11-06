@@ -142,7 +142,7 @@ function Read-Config {
 # ---- load config ----
 $cfg = Read-Config
 if (-not $cfg) { Write-Log 'config.json not found. Run set-token.ps1 once (or run-signin.cmd) to bootstrap.'; exit 2 }
-if (-not $cfg.baseUrl) { $cfg | Add-Member -NotePropertyName baseUrl -NotePropertyValue 'https://aimarket.hncig.cn:4090' -Force }
+if (-not $cfg.baseUrl) { $cfg | Add-Member -NotePropertyName baseUrl -NotePropertyValue 'https://aimarket.hncig.cn' -Force }
 
 function Invoke-Renewal {
   $node = Find-Node
@@ -213,11 +213,6 @@ function New-Headers([string]$t) {
   return @{ Authorization = 'Bearer ' + $t; 'x-request-id' = [guid]::NewGuid().ToString() }
 }
 
-# ---- keep the platform address current ----
-# The site is moving from https://aimarket.hncig.cn:4090 to the portless HTTPS
-# origin and the admin says 4090 will be retired one day. Probe the configured
-# address once; if it stops answering but its sibling still does, switch over
-# and remember it, so the retirement costs no code change and no QR re-scan.
 function Get-SiblingOrigin([string]$o) {
   try {
     $u = [Uri]$o
@@ -238,31 +233,59 @@ function Test-SiteOrigin([string]$o, [string]$t) {
   }
 }
 
-if (-not (Test-SiteOrigin $baseUrl $token)) {
+# The platform has moved to the portless origin https://aimarket.hncig.cn, which
+# is what config.json now uses. We deliberately do NOT probe the address on every
+# run (that cost an extra round trip each morning): instead, if a request fails in
+# a way that looks like the address being dead, try the sibling origin once and,
+# if it answers, switch over and remember it. So a future retirement of :4090 - or
+# of whatever address we are on - still costs no code change and no QR re-scan.
+$script:baseUrlSwitched = $false
+function Repair-BaseUrl {
+  param($err, [string]$t)
+  if ($script:baseUrlSwitched) { return $false }
+  # Only "no answer at all" failures qualify. An HTTP status, or a body carrying a
+  # JSON code, means the address is alive and the problem is elsewhere (token,
+  # captcha, server bug). Checked this way rather than by exception type so it
+  # behaves the same on PowerShell 5.1 (WebException) and 7 (HttpRequestException).
+  $resp = $null
+  try { $resp = $err.Exception.Response } catch { }
+  if ($resp) { return $false }
+  if (Get-BodyCode $err) { return $false }
+  # A timeout also has no response, so confirm the current address really is dead
+  # before leaving it: retrying the cheap status call is what keeps a slow-but-live
+  # origin from being mistaken for a retired one.
+  if (Test-SiteOrigin $baseUrl $t) { return $false }
   $sib = Get-SiblingOrigin $baseUrl
-  if ($sib -and (Test-SiteOrigin $sib $token)) {
-    Write-Log ('platform no longer answers at ' + $baseUrl + ' - switched the API address to ' + $sib)
-    $baseUrl = $sib
-    $cfg | Add-Member -NotePropertyName baseUrl -NotePropertyValue $sib -Force
-    $json = $cfg | ConvertTo-Json -Depth 6
-    # no BOM: renew-token.js and sign-via-browser.js JSON.parse this file
-    [IO.File]::WriteAllText($ConfigPath, $json, (New-Object Text.UTF8Encoding($false)))
-    Show-Toast -Title '元筑AI集市自动签到' -Message ('平台访问地址已切换为 ' + $sib)
-  } else {
-    Write-Log ('warning: ' + $baseUrl + ' did not answer the status endpoint; trying it anyway')
-  }
+  if (-not $sib) { return $false }
+  if (-not (Test-SiteOrigin $sib $t)) { return $false }
+  Write-Log ($baseUrl + ' is unreachable and ' + $sib + ' answers - switched the API address to ' + $sib)
+  $script:baseUrl = $sib
+  $script:cfg | Add-Member -NotePropertyName baseUrl -NotePropertyValue $sib -Force
+  # no BOM: renew-token.js and sign-via-browser.js JSON.parse this file
+  [IO.File]::WriteAllText($ConfigPath, ($script:cfg | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+  $script:baseUrlSwitched = $true
+  Show-Toast -Title '元筑AI集市自动签到' -Message ('平台访问地址已切换为 ' + $sib)
+  return $true
 }
 
 function Invoke-SignFlow {
   # returns @{ status = OK_DONE|OK_NONE|OK_STATUS|TOKEN_BAD|FAIL; awardedToday = n }
   param([string]$t)
-  try {
-    $st = Invoke-RestMethod -Method Get -Uri ($baseUrl + '/api/task-award/sign-status') -Headers (New-Headers $t) -TimeoutSec 30
-  } catch {
-    $code = Get-BodyCode $_
-    if ($code -eq 40201 -or $code -eq 40202 -or $code -eq 40200) { return @{ status = 'TOKEN_BAD' } }
-    Write-Log ('sign-status request failed: ' + $_.Exception.Message)
-    return @{ status = 'FAIL' }
+  # This is the only place that needs the address repair: later calls in this run
+  # reuse the address that just answered here. A connection-level failure means the
+  # platform may have moved, so fix baseUrl and retry once.
+  $st = $null
+  for ($try = 0; $try -lt 2; $try++) {
+    try {
+      $st = Invoke-RestMethod -Method Get -Uri ($baseUrl + '/api/task-award/sign-status') -Headers (New-Headers $t) -TimeoutSec 30
+      break
+    } catch {
+      $code = Get-BodyCode $_
+      if ($code -eq 40201 -or $code -eq 40202 -or $code -eq 40200) { return @{ status = 'TOKEN_BAD' } }
+      if ($try -eq 0 -and (Repair-BaseUrl $_ $t)) { continue }
+      Write-Log ('sign-status request failed: ' + $_.Exception.Message)
+      return @{ status = 'FAIL' }
+    }
   }
   $d = $st.data
   if ($null -eq $d -or [int]$st.code -ne 20000) {

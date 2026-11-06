@@ -19,7 +19,7 @@ signin.ps1 ── 令牌还有效？──── 否 ──► renew-token.js（
    │                                用 chrome-profile 里的企业微信 SSO 会话
    │ 是                            /api/auth/unified/start → IdP → 回跳拿新令牌
    ▼                                新令牌写回 config.json
-探测 baseUrl 是否仍然可用 ◄──────────┘（两个地址都会试，必要时自动切换）
+用 config.json 的 baseUrl 调 API ◄───┘（连不上时自动回退到兄弟地址并重试一次）
    │
    ▼
 GET /api/task-award/sign-status
@@ -51,19 +51,20 @@ GET /api/task-award/sign-status
 
 ## 关于平台访问地址（重要）
 
-平台正式地址已改为 **https://aimarket.hncig.cn**（无端口），正在从 **https://aimarket.hncig.cn:4090** 迁走：2026-11-06 起统一门户的认证回调已落在无端口地址（`:4090` 暂时还活着）。官方说法是两个地址"登录态不互通"，实测更准确的描述是：
+平台正式地址已改为 **https://aimarket.hncig.cn**（无端口），2026-11-06 起统一门户的认证回调也已切到该地址，本工具的 `config.json` 默认就用它。旧地址 **https://aimarket.hncig.cn:4090** 目前还活着，实测关于登录态的准确描述是：
 
 - 服务端 token **两边通用**（同一个后端，任一地址调 API 都返回 200）
-- 浏览器里的 `localStorage` 按 origin 隔离，所以登录态只会出现在回调落地的那一个地址上，**会随平台切换而搬家**
+- 浏览器里的 `localStorage` 按 origin 隔离，登录态只出现在回调落地的那个地址上（已随平台切换到无端口）
 - 会话 Cookie 作用域是 `.hncig.cn`，**两个地址共享**
 
-本工具**不假设哪个地址是活的**，三个层面各自适配：
+本工具**不假设只有 `:4090` 或只有无端口能用**，但也不会为此多花一次请求：
 
-- `signin.ps1`：运行前先探一次 `config.json` 里的 `baseUrl`；若它不再响应而兄弟地址（`:4090` ↔ 无端口）正常，就自动切换并写回 `config.json`，同时通知你切到了哪个地址。
-- `renew-token.js`：判断"SSO 是否已回跳回本站"**只比主机名，不比端口**；两个地址都会试，用能打开的那个续期，并把结果记回 `config.json`。
-- `sign-via-browser.js`：注入令牌并把两个地址依次试一遍，任一边能点到签到按钮即可。
+- `signin.ps1`：正常路径**不做地址探测**。只有当请求出现"完全连不上"（不是 4xx/5xx，也不是超时后仍能答）时，才自动回退到兄弟地址、重试一次，并把新地址写回 `config.json`（同时通知你）。切换只发生一次，不会反复试探。
+- `renew-token.js`：两个地址都会试，用能真正打开页面的那个续期，并把结果记回 `config.json`；判断"SSO 是否已回跳回本站"**只比主机名，不比端口**，所以回调地址再搬家也不会误判成需要重新扫码。
+- `sign-via-browser.js`：注入令牌（带主机名白名单），并把两个地址依次试一遍，任一边能点到签到按钮即可。
 
-所以平台彻底停掉 `:4090` 那天，本工具无需改代码、也无需重新扫码。
+因此平台彻底停掉 `:4090`（或将来再换地址）那天，本工具无需改代码、也无需重新扫码。
+
 ## 环境要求
 
 - Windows 10 / 11
@@ -139,7 +140,7 @@ GET /api/task-award/sign-status
 | `"error":"redirected-to-login"` | 平台不认这个令牌（两个地址都被踢回登录页） | 双击 `login-once.cmd` 重新扫码 |
 | `"error":"no-sign-button"` | 页面改版，找不到签到按钮 | 看同一行 `diag.buttons` 的实际按钮文字，据此调整匹配规则 |
 | `"error":"captcha-not-solved-in-…s"` | 验证码没解出 | 稍后手动打开平台点一次签到；频繁出现再反馈 |
-| `platform no longer answers at … switched the API address to …` | 平台地址迁移，工具已自动跟随 | 无 |
+| `… is unreachable and … answers - switched the API address to …` | 平台地址迁移，工具已自动跟随并写回 config.json | 无 |
 
 ## 文件结构
 

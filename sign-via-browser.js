@@ -10,8 +10,8 @@
  * token from config.json), not by scraping the page: the WASM solve can outlast
  * any on-page toast, and only the server knows whether the award landed.
  *
- * Two things make this survive the platform moving its SSO callback between
- * https://aimarket.hncig.cn:4090 and the portless origin:
+ * Two things make this survive the platform moving its session between the
+ * official https://aimarket.hncig.cn and the legacy https://aimarket.hncig.cn:4090:
  *   1. the token from config.json is injected into the page (CDP, before any
  *      site script runs) instead of hoping that origin already holds a session;
  *   2. every candidate origin is tried in turn, so neither address has to be
@@ -67,7 +67,7 @@ const scriptDir = __dirname;
 const cfgPath = path.join(scriptDir, "config.json");
 let cfg = {};
 try { cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8")); } catch {}
-const baseUrl = (cfg.baseUrl || "https://aimarket.hncig.cn:4090").replace(/\/+$/, "");
+const baseUrl = (cfg.baseUrl || "https://aimarket.hncig.cn").replace(/\/+$/, "");
 const profileDir = cfg.profileDir || path.join(scriptDir, "chrome-profile");
 const token = cfg.token || "";
 
@@ -79,10 +79,10 @@ function asciiJson(o) {
 function log(o) { console.log(typeof o === "string" ? o : asciiJson(o)); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// Origins worth trying: whatever config says first, then its sibling. The
-// platform is migrating from https://aimarket.hncig.cn:4090 to the portless
-// origin and the SSO callback/session can end up on either one, so nothing
-// here assumes a single address is alive.
+// Origins worth trying: whatever config says first, then its sibling. Since
+// 2026-11-06 the SSO callback lands on the portless origin, but :4090 is still
+// alive and the session can end up on either one, so nothing here assumes a
+// single address is the right one.
 function candidateOrigins() {
   const one = argValue("--origin", "");
   if (one) return [one.replace(/\/+$/, "")];
