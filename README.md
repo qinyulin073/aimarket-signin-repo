@@ -44,7 +44,7 @@ GET /api/task-award/sign-status
     `localStorage.auth`，所以不依赖“哪个地址恰好还留着浏览器登录态”。平台在两个地址
     之间搬家登录态时兜底照常工作；注入有主机名白名单，绝不会写到统一门户 IdP 等第三方页面上。
   - **无头只短试、快速转可见窗口**：实测 Cap.js 在无头模式几乎解不出来（点到按钮后
-    一直不过），可见窗口通常 10～20 秒就过。所以无头只给约 25 秒预算，不行立刻改用
+    一直不过），可见窗口通常 10～20 秒就过。所以无头只给 15 秒解算预算，不行立刻改用
     可见窗口重试，不会再让你干等一两分钟。
   兜底每一步都会实时写进 `signin.log`（`browser: sign button clicked...`），不再是
   “憋一分钟才出结果”。
@@ -133,12 +133,12 @@ GET /api/task-award/sign-status
 | `session expired: … must be confirmed once` | SSO 会话失效 | 双击 `login-once.cmd` 重新扫码 |
 | `renewal failed (exit 3): cdp-unreachable` | 专用 Chrome 被占用 | 关掉残留的专用 Chrome 窗口后重试 |
 | `sign-status request failed: …` | 网络/服务异常 | 稍后自动重试（计划任务只跑一次，可手动 `run-signin.cmd` 补签） |
-| `sign request blocked by captcha (code 40000)` | 平台验证码兜底已启动 | 正常；无头约 25 秒，随后自动开可见窗口 |
+| `sign request blocked by captcha (code 40000)` | 平台验证码兜底已启动 | 正常；无头最多约 20 秒（含点按钮），随后自动开可见窗口 |
 | `browser: sign button clicked, waiting for the site captcha` | 已点到签到按钮，验证码正在解 | 正常，等通知 |
 | `browser sign: already signed today.` | 兜底时当天已被签到 | 无 |
 | `"error":"redirected-to-login"` | 平台不认这个令牌（两个地址都被踢回登录页） | 双击 `login-once.cmd` 重新扫码 |
 | `"error":"no-sign-button"` | 页面改版，找不到签到按钮 | 看同一行 `diag.buttons` 的实际按钮文字，据此调整匹配规则 |
-| `"error":"captcha-not-solved-in-…s"` | 可见窗口里验证码也没解出 | 稍后手动打开平台点一次签到；频繁出现再反馈 |
+| `"error":"captcha-not-solved-in-…s"` | 验证码没解出 | 稍后手动打开平台点一次签到；频繁出现再反馈 |
 | `platform no longer answers at … switched the API address to …` | 平台地址迁移，工具已自动跟随 | 无 |
 
 ## 文件结构
