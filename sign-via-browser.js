@@ -10,15 +10,28 @@
  * token from config.json), not by scraping the page: the WASM solve can outlast
  * any on-page toast, and only the server knows whether the award landed.
  *
+ * Two things make this survive the platform moving its SSO callback between
+ * https://aimarket.hncig.cn:4090 and the portless origin:
+ *   1. the token from config.json is injected into the page (CDP, before any
+ *      site script runs) instead of hoping that origin already holds a session;
+ *   2. every candidate origin is tried in turn, so neither address has to be
+ *      "the right one" in config.json.
+ *
  * Usage:
- *   node sign-via-browser.js                # headless, 90s solve budget
- *   node sign-via-browser.js --visible      # show the Chrome window
- *   node sign-via-browser.js --wait 120     # solve budget in seconds
+ *   node sign-via-browser.js                 # headless, silent
+ *   node sign-via-browser.js --visible       # show the Chrome window
+ *   node sign-via-browser.js --wait 120      # solve budget per attempt (s)
+ *   node sign-via-browser.js --click 25      # button-search budget per attempt (s)
+ *   node sign-via-browser.js --skip-precheck # force the browser path (testing)
+ *   node sign-via-browser.js --origin URL    # try one origin only
+ *
+ * stdout is always single-line ASCII JSON (non-ASCII escaped as \uXXXX) so it
+ * cannot be corrupted by whatever codepage the caller decodes it with.
  *
  * Exit codes:
- *   0  signed by this run (JSON on stdout with awarded + balance)
+ *   0  signed by this run (awarded + balance included)
  *   1  already signed today, nothing to do
- *   2  still not signed when the budget ran out, or no button found
+ *   2  not signed when the budgets ran out (see error/origin/diag fields)
  *   3  unexpected failure (chrome / CDP / config problems)
  */
 "use strict";
@@ -38,13 +51,15 @@ function argValue(f, dflt) {
 
 const visible = hasFlag("--visible");
 // --skip-precheck forces the browser path even when the day is already signed,
-// so the plumbing (Chrome + CDP + button scan) can be tested without signing.
+// so the plumbing (Chrome + CDP + injection + button scan) can be tested
+// without signing.
 const skipPre = hasFlag("--skip-precheck");
-// Headless still solves, it is just slower because Cap.js checks visibility,
-// so give it room to finish instead of relaunching in a window.
-const waitSec = Number(argValue('--wait', visible ? 90 : 60));
-// How long to look for the button before giving up.
-const clickSec = Number(argValue('--click', visible ? 45 : 30));
+// Headless click works, but in practice Cap.js almost never solves without a
+// visible window, so headless gets a short solve budget and the caller moves
+// on to --visible quickly instead of leaving the user waiting.
+const waitSec = Number(argValue('--wait', visible ? 90 : 25));
+// How long to look for the button on one origin before trying the next.
+const clickSec = Number(argValue('--click', visible ? 30 : 20));
 const port = Number(argValue("--port", 9336));
 
 const scriptDir = __dirname;
@@ -55,16 +70,40 @@ const baseUrl = (cfg.baseUrl || "https://aimarket.hncig.cn:4090").replace(/\/+$/
 const profileDir = cfg.profileDir || path.join(scriptDir, "chrome-profile");
 const token = cfg.token || "";
 
-function log(o) { console.log(typeof o === "string" ? o : JSON.stringify(o)); }
+// Keep stdout pure ASCII: log lines survive any console codepage.
+function asciiJson(o) {
+  return JSON.stringify(o).replace(/[\u0080-\uffff]/g,
+    (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+}
+function log(o) { console.log(typeof o === "string" ? o : asciiJson(o)); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Origins worth trying: whatever config says first, then its sibling. The
+// platform is migrating from https://aimarket.hncig.cn:4090 to the portless
+// origin and the SSO callback/session can end up on either one, so nothing
+// here assumes a single address is alive.
+function candidateOrigins() {
+  const one = argValue("--origin", "");
+  if (one) return [one.replace(/\/+$/, "")];
+  const out = [baseUrl];
+  try {
+    const u = new URL(baseUrl);
+    const root = u.protocol + "//" + u.hostname;
+    if (u.port === "4090") out.push(root);
+    else if (!u.port) out.push(root + ":4090");
+  } catch {}
+  return Array.from(new Set(out.filter(Boolean)));
+}
+
+const allOrigins = candidateOrigins();
+// First origin that answers a real JSON envelope; reused for later calls.
+let preferredOrigin = null;
 
 const agent = new https.Agent({ rejectUnauthorized: false });
 
-// Small GET against the platform API, same call signin.ps1 makes.
-function apiGet(p) {
+function apiGetOn(origin, p) {
   return new Promise((resolve) => {
-    if (!token) { resolve({ ok: false, why: "no-token-in-config" }); return; }
-    const u = new URL(baseUrl + p);
+    const u = new URL(origin + p);
     const req = https.request({
       agent,
       hostname: u.hostname,
@@ -72,7 +111,7 @@ function apiGet(p) {
       path: u.pathname + u.search,
       method: "GET",
       headers: { Authorization: "Bearer " + token, "x-request-id": String(Date.now()) },
-      timeout: 20000
+      timeout: 15000
     }, (res) => {
       let buf = "";
       res.setEncoding("utf8");
@@ -90,6 +129,22 @@ function apiGet(p) {
   });
 }
 
+// Small GET against the platform API, same call signin.ps1 makes. Tries the
+// configured origin, then the sibling, so one address being retired (or the
+// token being valid on the other one only) is not a failure.
+async function apiGet(p) {
+  if (!token) return { ok: false, why: "no-token-in-config" };
+  const order = preferredOrigin
+    ? [preferredOrigin].concat(allOrigins.filter(o => o !== preferredOrigin))
+    : allOrigins;
+  let last = { ok: false, why: "no-origin" };
+  for (const origin of order) {
+    last = await apiGetOn(origin, p);
+    if (last.ok && typeof last.code === "number") { preferredOrigin = origin; return last; }
+  }
+  return last;
+}
+
 // Today's sign state, straight from the server.
 async function signState() {
   const r = await apiGet("/api/task-award/sign-status");
@@ -103,9 +158,34 @@ async function balance() {
   return null;
 }
 
-// Match the button a human would click. The unsigned button reads
-// "签到领 N 积分", the signed one "今日已签到"; compared via \u escapes so this
-// file stays plain ASCII.
+// Run before any site script on every new document, so the SPA boots already
+// holding our token. Shape seen in the wild: localStorage.auth =
+// {"auth":{"token":"eyJ..."}}; a logged-out origin holds {"auth":{}}.
+// The hostname guard matters: this hook fires on every navigation, including a
+// bounce to the unified-portal IdP, and our bearer token must never be written
+// into a third-party origin's storage.
+function injectScript(tok, siteHost) {
+  return [
+    "(() => {",
+    "  const T = " + JSON.stringify(tok) + ";",
+    "  const H = " + JSON.stringify(siteHost) + ";",
+    "  if (!T) return;",
+    "  if (location.hostname !== H) return;",
+    "  try {",
+    "    let obj = {};",
+    "    try { obj = JSON.parse(localStorage.getItem('auth') || '{}'); } catch (e) { obj = {}; }",
+    "    if (!obj || typeof obj !== 'object') obj = {};",
+    "    if (!obj.auth || typeof obj.auth !== 'object') obj.auth = {};",
+    "    if (obj.auth.token !== T) { obj.auth.token = T; localStorage.setItem('auth', JSON.stringify(obj)); }",
+    "  } catch (e) {}",
+    "})()"
+  ].join("\n");
+}
+
+// Match the button a human would click (by title/innerText). The unsigned one
+// reads U+7B7E U+5230 U+9886 N U+79EF U+5206 ("sign in to earn N points") and the
+// signed one U+4ECA U+65E5 U+5DF2 U+7B7E U+5230 ("already signed today"); the
+// patterns below use \u escapes so this file stays plain ASCII.
 const CLICK_SIGN = [
   "(() => {",
   "  const SIGN = /\\u7b7e\\u5230/;",
@@ -124,8 +204,9 @@ const CLICK_SIGN = [
 const DIAG = [
   "(() => {",
   "  const btns = Array.from(document.querySelectorAll('button')).map(b => ((b.getAttribute('title') || '') + '|' + (b.innerText || '').trim()).slice(0, 40));",
-  "  let has = false; try { has = !!(localStorage.getItem('auth') || ''); } catch {}",
-  "  return { buttons: btns.slice(0, 10), hasAuth: has, href: location.href.slice(0, 80), docTitle: (document.title || '').slice(0, 40) };",
+  "  let hasToken = false;",
+  "  try { const a = JSON.parse(localStorage.getItem('auth') || '{}'); hasToken = !!(a && a.auth && a.auth.token); } catch (e) {}",
+  "  return { buttons: btns.slice(0, 10), hasToken, href: location.href.slice(0, 90), docTitle: (document.title || '').slice(0, 40) };",
   "})()"
 ].join("\n");
 
@@ -154,10 +235,14 @@ async function waitJson(url, tries) {
   if (!token) { log({ ok: false, error: "no-token-in-config" }); process.exit(3); }
   const chromePath = resolveChrome();
   if (!chromePath) { log({ ok: false, error: "chrome-not-found" }); process.exit(3); }
+  const origins = candidateOrigins();
 
   // Cheapest check first: if the day is already signed, no browser is needed.
   const before = await signState();
-  if (before.ok && before.signed && !skipPre) { await cleanupSoon(1, { ok: true, already: true }, chromePath); }
+  if (before.ok && before.signed && !skipPre) {
+    log({ ok: true, already: true, awarded: before.award, balance: await balance() });
+    process.exit(1);
+  }
 
   fs.mkdirSync(profileDir, { recursive: true });
   const launchArgs = [
@@ -208,60 +293,104 @@ async function waitJson(url, tries) {
     pending.set(id, (m) => { clearTimeout(t); res(m); });
     try { ws.send(JSON.stringify({ id, method, params })); } catch { clearTimeout(t); res({ __timeout: true }); }
   });
-  const evalJs = async (expression) => {
-    const r = await call("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+  const evalJs = async (expression, awaitPromise = true) => {
+    const r = await call("Runtime.evaluate", { expression, awaitPromise, returnByValue: true });
     if (!r || !r.result || r.result.exceptionDetails) return null;
     const res = r.result.result;
     return (res && res.value !== undefined) ? res.value : null;
   };
 
   await call("Page.enable", {});
-  await call("Page.navigate", { url: baseUrl + "/" });
+  // One host covers both origins here (they differ only by port), which is exactly
+  // the set of sites we are willing to hand the token to.
+  const siteHost = (() => { try { return new URL(baseUrl).hostname; } catch { return ""; } })();
+  await call("Page.addScriptToEvaluateOnNewDocument", { source: injectScript(token, siteHost) });
 
-  // The sign-in widget appears only once the SPA has loaded the user session,
-  // so wait for the button instead of guessing a sleep length.
-  const clickDeadline = Date.now() + clickSec * 1000;
-  let clicked = false;
-  while (Date.now() < clickDeadline) {
-    await sleep(1500);
-    const c = await evalJs(CLICK_SIGN);
-    if (c && c.clicked) { clicked = true; break; }
-    if (c && c.alreadyOnPage) {
-      const s = await signState();
-      if (s.ok && s.signed) { await cleanup(1, { ok: true, already: true }); }
+  // Find the button on one origin and click it. We deliberately do NOT wait for
+  // the captcha here: Cap.js mostly refuses to solve in headless (every recent
+  // day solved only once a window was shown), so burning the full budget per
+  // origin just delays the visible attempt. First origin whose page is signed
+  // in and whose button we can click wins.
+  async function clickOn(origin) {
+    await call("Page.navigate", { url: origin + "/" });
+    const deadline = Date.now() + clickSec * 1000;
+    let sawLogin = false;
+    while (Date.now() < deadline) {
+      await sleep(1500);
+      const href = await evalJs("location.href", false);
+      if (typeof href === "string" && /\/login/.test(href)) { sawLogin = true; continue; }
+      const c = await evalJs(CLICK_SIGN);
+      if (c && c.clicked) {
+        log({ progress: "sign button clicked, waiting for the site captcha", origin });
+        return { kind: "clicked", origin };
+      }
+      if (c && c.alreadyOnPage) {
+        const s = await signState();
+        if (s.ok && s.signed) return { kind: "signed", award: (s.award != null ? Number(s.award) : null), origin, via: "already" };
+        return { kind: "page-signed-server-not", origin, diag: await evalJs(DIAG) };
+      }
     }
+    return { kind: sawLogin ? "redirected-to-login" : "no-sign-button", origin, diag: await evalJs(DIAG) };
+  }
+
+  const attempts = [];
+  let clicked = null;
+  for (const origin of origins) {
+    const a = await clickOn(origin);
+    attempts.push(a);
+    if (a.kind === "signed") {
+      // The page already showed "signed today" and the server agrees: nothing
+      // was earned by this run, so report it as "already" (exit 1), never as a
+      // fresh success.
+      await cleanup(1, { ok: true, already: true, awarded: a.award, balance: await balance(), origin, via: "already", attempts });
+    }
+    if (a.kind === "clicked") { clicked = a; break; }
   }
 
   if (!clicked) {
-    const diag = await evalJs(DIAG);
-    await cleanup(2, Object.assign({ ok: false, error: "sign-button-not-found" }, diag || {}));
+    // Every origin bounced to /login even though a token was injected: the
+    // server rejected that token, so this is a re-login problem, not a missing
+    // button. Say so, otherwise the log reads like a page-layout change.
+    await cleanup(2, {
+      ok: false,
+      error: attempts.length && attempts.every(a => a.kind === "redirected-to-login") ? "redirected-to-login" : "no-sign-button",
+      hint: attempts.length && attempts.every(a => a.kind === "redirected-to-login")
+        ? "token rejected by the server - run login-once.cmd and scan the WeCom QR code"
+        : "no sign button on any origin - the page layout may have changed",
+      tried: attempts.map(a => ({ origin: a.origin, kind: a.kind })),
+      diag: (attempts[attempts.length - 1] || {}).diag || null
+    });
   }
 
-  // Poll the server until the site's own captcha solve lands.
-  const deadline = Date.now() + waitSec * 1000;
-  let awarded = null;
-  while (Date.now() < deadline) {
-    await sleep(2000);
+  // One shared budget for the captcha the site is now solving on our behalf.
+  const stop = Date.now() + waitSec * 1000;
+  let signed = null;
+  while (Date.now() < stop) {
+    await sleep(2500);
     const s = await signState();
-    if (s.ok && s.signed) { awarded = (s.award != null) ? Number(s.award) : null; break; }
+    if (s.ok && s.signed) { signed = s; break; }
+  }
+  if (!signed) { const s = await signState(); if (s.ok && s.signed) signed = s; }
+
+  if (!signed) {
+    await cleanup(2, {
+      ok: false,
+      error: "captcha-not-solved-in-" + waitSec + "s",
+      note: visible ? "shown a window and still unsigned" : "headless rarely solves this captcha; retry with --visible",
+      origin: clicked.origin,
+      tried: attempts.map(a => ({ origin: a.origin, kind: a.kind })),
+      diag: await evalJs(DIAG)
+    });
   }
 
-  // Last look: the solve may have finished while we were deciding to give up.
-  if (awarded === null) {
-    const s = await signState();
-    if (s.ok && s.signed) awarded = (s.award != null) ? Number(s.award) : null;
-  }
-
-  if (awarded === null) { await cleanup(2, { ok: false, error: "still-unsigned-after-" + waitSec + "s" }); }
-
-  await cleanup(0, { ok: true, already: false, awarded, balance: await balance() });
+  await cleanup(0, {
+    ok: true, already: false,
+    awarded: (signed.award != null ? Number(signed.award) : null),
+    balance: await balance(),
+    origin: clicked.origin, via: "clicked",
+    attempts
+  });
 })().catch(e => {
   log({ ok: false, error: "unexpected", detail: String((e && e.stack) || e).slice(0, 400) });
   process.exit(3);
 });
-
-// Used before Chrome starts, where there is no socket to close.
-async function cleanupSoon(code, payload, chromePath) {
-  log(payload);
-  process.exit(code);
-}

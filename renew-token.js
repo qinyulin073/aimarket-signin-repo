@@ -52,6 +52,20 @@ function onSite(href) {
   try { return new URL(href).hostname === siteHost; } catch { return false; }
 }
 
+// Origins to try: the one in config plus its portless/port-4090 sibling. The
+// platform is migrating to the portless HTTPS address, so neither may be assumed
+// alive; if the configured one no longer loads, renewal falls over to the other.
+function candidateSites() {
+  const out = [baseUrl];
+  try {
+    const u = new URL(baseUrl);
+    const root = u.protocol + "//" + u.hostname;
+    if (u.port === "4090") out.push(root);
+    else if (!u.port) out.push(root + ":4090");
+  } catch {}
+  return Array.from(new Set(out.filter(Boolean)));
+}
+
 function log(o) { console.log(typeof o === "string" ? o : JSON.stringify(o)); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -173,16 +187,31 @@ const TOKEN_EXPR = [
     } catch {}
   }
 
-  // 1) land on the site so relative fetches work
-  await call("Page.navigate", { url: baseUrl + "/" });
+  // 1) land on the site so relative fetches work. Try each origin until one
+  // actually serves the app, and remember it for the SSO start call below.
   let oldToken = "";
-  for (let i = 0; i < 30; i++) {
-    await sleep(800);
-    const href = await evalJs("location.href", false);
-    if (onSite(href)) {
+  let liveSite = baseUrl;
+  const loadedOrigins = [];
+  for (const site of candidateSites()) {
+    await call("Page.navigate", { url: site + "/" });
+    for (let i = 0; i < 20; i++) {
+      await sleep(800);
+      const href = await evalJs("location.href", false);
+      if (!onSite(href)) continue;
+      // A dead origin lands on an error page or never reaches the app shell;
+      // treat "we are on this origin" plus a readable token slot as alive.
+      const probe = await evalJs(
+        "(() => { try { localStorage.getItem('auth'); return 1; } catch (e) { return 0; } })()", false);
+      if (!probe) continue;
+      liveSite = site;
+      loadedOrigins.push(site);
       oldToken = (await evalJs(TOKEN_EXPR)) || "";
       break;
     }
+    if (loadedOrigins.length) break;
+  }
+  if (liveSite !== baseUrl && loadedOrigins.length) {
+    log({ progress: "configured address did not load, renewing through " + liveSite });
   }
 
   // 2) kick off the unified (enterprise WeChat) SSO entry
@@ -224,6 +253,9 @@ const TOKEN_EXPR = [
   cfg.token = newToken;
   cfg.setAt = new Date().toISOString();
   cfg.profileDir = profileDir;
+  // follow the platform if it moved, so the next run does not start from a
+  // retired address
+  if (loadedOrigins.length && liveSite !== baseUrl) cfg.baseUrl = liveSite;
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), "utf8");
 
   // remember the SSO cookies (incl. session cookies) for future silent renewals

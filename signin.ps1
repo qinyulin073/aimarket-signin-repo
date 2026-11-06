@@ -42,6 +42,29 @@ function Write-Log([string]$msg) {
   Write-Host $line
 }
 
+# Turn a sign-via-browser.js error code into one plain-Chinese sentence, so the
+# log and the toast read as a cause instead of an opaque code.
+function Explain-BrowserError($j) {
+  if (-not $j) { return '浏览器兜底无输出（Node 脚本可能没跑起来）' }
+  switch ($j.error) {
+    'redirected-to-login'        { return '平台不认这个登录令牌，需要重新扫码（双击 login-once.cmd）' }
+    'no-sign-button'             { return '页面上找不到签到按钮，可能是平台改版了' }
+    'page-signed-server-not'     { return '页面显示已签到，但服务器说没有，通常稍后会自动一致' }
+    'cdp-unreachable'            { return 'Chrome 调试端口没起来，通常是签到专用的浏览器配置被其它窗口占用' }
+    'cdp-ws-failed'              { return '连不上 Chrome 的调试接口，重试或重启电脑后再试' }
+    'chrome-not-found'           { return '找不到 Chrome/Edge，无法自动过验证码' }
+    'no-token-in-config'         { return 'config.json 里没有可用令牌' }
+    'sso-start-failed'           { return '平台统一登录入口没有响应' }
+    default {
+      if ($j.error -like 'captcha-not-solved*') {
+        return '验证码在自动窗口里也没解出（' + $j.error + '），可稍后手动签到一次'
+      }
+      if ($j.error -like 'still-unsigned*') { return '点到了签到按钮，但验证码未在限时内完成' }
+      return ('兜底失败：' + $j.error)
+    }
+  }
+}
+
 function Show-Toast {
   param([string]$Title, [string]$Message)
   if ($NoToast) { return }
@@ -190,6 +213,46 @@ function New-Headers([string]$t) {
   return @{ Authorization = 'Bearer ' + $t; 'x-request-id' = [guid]::NewGuid().ToString() }
 }
 
+# ---- keep the platform address current ----
+# The site is moving from https://aimarket.hncig.cn:4090 to the portless HTTPS
+# origin and the admin says 4090 will be retired one day. Probe the configured
+# address once; if it stops answering but its sibling still does, switch over
+# and remember it, so the retirement costs no code change and no QR re-scan.
+function Get-SiblingOrigin([string]$o) {
+  try {
+    $u = [Uri]$o
+    $root = $u.Scheme + '://' + $u.Host
+    if ($u.Port -eq 4090) { return $root }
+    if ($u.IsDefaultPort) { return ($root + ':4090') }
+    return $null
+  } catch { return $null }
+}
+
+function Test-SiteOrigin([string]$o, [string]$t) {
+  try {
+    $r = Invoke-RestMethod -Method Get -Uri ($o + '/api/task-award/sign-status') -Headers (New-Headers $t) -TimeoutSec 20
+    return ($null -ne $r -and $null -ne $r.code)
+  } catch {
+    # an HTTP error whose body still carries a JSON code means the API is alive there
+    return ($null -ne (Get-BodyCode $_))
+  }
+}
+
+if (-not (Test-SiteOrigin $baseUrl $token)) {
+  $sib = Get-SiblingOrigin $baseUrl
+  if ($sib -and (Test-SiteOrigin $sib $token)) {
+    Write-Log ('platform no longer answers at ' + $baseUrl + ' - switched the API address to ' + $sib)
+    $baseUrl = $sib
+    $cfg | Add-Member -NotePropertyName baseUrl -NotePropertyValue $sib -Force
+    $json = $cfg | ConvertTo-Json -Depth 6
+    # no BOM: renew-token.js and sign-via-browser.js JSON.parse this file
+    [IO.File]::WriteAllText($ConfigPath, $json, (New-Object Text.UTF8Encoding($false)))
+    Show-Toast -Title '元筑AI集市自动签到' -Message ('平台访问地址已切换为 ' + $sib)
+  } else {
+    Write-Log ('warning: ' + $baseUrl + ' did not answer the status endpoint; trying it anyway')
+  }
+}
+
 function Invoke-SignFlow {
   # returns @{ status = OK_DONE|OK_NONE|OK_STATUS|TOKEN_BAD|FAIL; awardedToday = n }
   param([string]$t)
@@ -224,7 +287,7 @@ function Invoke-SignFlow {
       # platform enabled Cap.js captcha on the sign endpoint (since 2026-11-01);
       # fall back to clicking the real button in Chrome so the site's own captcha flow runs
       Write-Log 'sign request blocked by captcha (code 40000), trying browser sign-in...'
-      Show-Toast -Title '元筑AI集市自动签到' -Message '签到遇到平台验证码，正在后台自动完成，约需 1 分钟'
+      Show-Toast -Title '元筑AI集市自动签到' -Message '签到遇到平台验证码，正在自动完成；若弹出浏览器窗口请保持打开，约需 20 秒'
       $bs = Invoke-BrowserSign -visible $false
       if (-not $bs) { $bs = Invoke-BrowserSign -visible $true }
       if ($bs -and $bs.ok) {
@@ -288,23 +351,58 @@ function Invoke-BrowserSign {
   if (-not $node) { Write-Log 'browser sign skipped: node.exe not found.'; return $null }
   $js = Join-Path $PSScriptRoot 'sign-via-browser.js'
   if (-not (Test-Path -LiteralPath $js)) { Write-Log 'sign-via-browser.js missing.'; return $null }
-  if ($visible) { $wargs = @($js, '--visible'); Write-Log 'opening a browser window for captcha sign-in...' }
-  else { $wargs = @($js); Write-Log 'solving captcha in a background browser (about 1 minute, no window)...' }
-  $out = & $node @wargs 2>&1
-  $code = $LASTEXITCODE
+  if ($visible) { $wargs = @('--visible'); Write-Log 'opening a browser window for the captcha (visible windows solve it, usually under 20 seconds)...' }
+  else { $wargs = @(); Write-Log 'solving the captcha in a background browser (no window, giving it ~35 seconds)...' }
+
+  # Stream Chrome's progress lines instead of collecting them until the child
+  # exits: previously the log stayed silent for a full minute, which looked like
+  # a hang. sign-via-browser.js prints ASCII JSON, one object per line.
+  $psi = New-Object Diagnostics.ProcessStartInfo
+  $psi.FileName = $node
+  $psi.Arguments = ('"' + $js + '" ' + ($wargs -join ' '))
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  # stderr is deliberately NOT redirected: nothing here drains it, and a full
+  # pipe buffer would freeze the child mid-run. sign-via-browser.js reports every
+  # diagnostic on stdout (as ASCII JSON), so stdout alone is enough.
+  # Decode explicitly instead of inheriting the console codepage: that is what
+  # turned earlier browser output into mojibake in signin.log.
+  $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+  $psi.WorkingDirectory = $PSScriptRoot
+  $proc = [Diagnostics.Process]::Start($psi)
   $json = $null
-  foreach ($line in @($out)) {
-    try { $j = $line | ConvertFrom-Json; if ($null -ne $j.ok) { $json = $j; break } } catch {}
+  while (-not $proc.StandardOutput.EndOfStream) {
+    $line = $proc.StandardOutput.ReadLine()
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $j = $null
+    try { $j = $line | ConvertFrom-Json } catch { }
+    if ($null -eq $j) { Write-Log ('  browser: ' + $line); continue }
+    if ($j.progress) {
+      Write-Log ('  browser: ' + $j.progress + $(if ($j.origin) { ' [' + $j.origin + ']' } else { '' }))
+      continue
+    }
+    if ($null -ne $j.ok) { $json = $j }
   }
+  $proc.WaitForExit()
+  $code = $proc.ExitCode
+  try { $proc.Dispose() } catch { }
+
   if ($json -and $json.ok) {
+    if ($json.origin) { Write-Log ('  browser: signed through ' + $json.origin) }
     if ($json.already) { return @{ ok = $true; already = $true; awarded = $null; balance = $null } }
     return @{ ok = $true; already = $false; awarded = $json.awarded; balance = $json.balance }
   }
   if ($code -eq 1) { return @{ ok = $true; already = $true; awarded = $null; balance = $null } }
-  Write-Log ('browser sign failed (exit ' + $code + '): ' + (($out | Select-Object -Last 3) -join ' | '))
+  # A single compact line: error plus which origins were tried, and the button
+  # text the page actually showed. All ASCII-safe because the JS escapes it.
+  $detail = 'browser sign failed (exit ' + $code + '): ' + $(if ($json) { ($json | ConvertTo-Json -Compress -Depth 4) } else { 'no JSON from sign-via-browser.js' })
+  Write-Log $detail
+  # Remember it so the final toast can name the cause, not just "request error".
+  $script:browserFail = $json
   return $null
 }
 
+$script:browserFail = $null
 $outcome = Invoke-SignFlow $token
 if ($outcome.status -eq 'TOKEN_BAD' -and -not $NoRenew) {
   Write-Log 'server rejected the token; renewing once and retrying...'
@@ -340,6 +438,10 @@ switch ($outcome.status) {
                 Show-Toast -Title '元筑AI集市自动签到' -Message '自动签到失败：登录令牌失效，请重新扫码（双击 login-once.cmd）'
                 exit 2 }
   default     { Write-Log 'sign-in flow failed, see log above.'
-                Show-Toast -Title '元筑AI集市自动签到' -Message '自动签到失败：请求异常，详见 signin.log'
+                # Name the actual cause when the captcha fallback reported one,
+                # instead of the old generic "request error".
+                $why = if ($script:browserFail) { Explain-BrowserError $script:browserFail } else { '请求异常，详见 signin.log' }
+                Write-Log ('reason: ' + $why)
+                Show-Toast -Title '元筑AI集市自动签到' -Message ('自动签到失败：' + $why)
                 exit 3 }
 }
