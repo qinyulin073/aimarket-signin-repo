@@ -2,6 +2,7 @@
 cd /d "%~dp0"
 set "NODE="
 for /f "delims=" %%i in ('where node 2^>nul') do set "NODE=%%i"
+if not defined NODE if exist "%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe" set "NODE=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"
 if not defined NODE (
   echo Node.js 18+ is required. Install it from https://nodejs.org/ then re-run.
   pause
