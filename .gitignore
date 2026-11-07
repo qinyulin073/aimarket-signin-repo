@@ -4,3 +4,11 @@ sso-cookies.json
 signin.log
 chrome-profile/
 *.log
+# any Chrome profile variant this tool or a debug session may create
+chrome-profile*/
+*profile*/
+
+# never commit anything that can carry credentials or session state
+*.pma
+*.sqlite
+Local State
