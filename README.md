@@ -28,25 +28,31 @@ GET /api/task-award/sign-status
                   ├─ 成功 → 通知
                   └─ 被验证码拦（400 / code 40000）
                         → sign-via-browser.js：注入令牌 + 点真实按钮，
-                          由网站自己过 Cap.js；先无头短试，再开可见窗口
+                          由网站自己过 Cap.js（可见窗口，实测 8~20 秒）
                         → 结果一律以 sign-status 为准 → 通知
 ```
 
 - 令牌（JWT）有效期 8 小时，每次运行都会自动续
 - 企业微信 SSO 会话（Cookie）有效期很长（约一年），期间无需扫码
 - SSO 会话彻底失效时，计划任务会自动弹窗让你扫一次码
-- **签到验证码兜底**：平台 2026-11-01 起在签到接口启用了 Cap.js 反机器人验证，
-  直接调用 API 会被拒（HTTP 400 `请完成安全验证后重试`）。遇到这种情况，脚本会
-  自动降级为 `sign-via-browser.js`：在专用 Chrome 里打开真实签到页面、点击真实签到
-  按钮，让网站自己的验证码跑完。**成功与否以 `/api/task-award/sign-status` 为准**
-  （验证码解算可能比页面上的提示文字更久，只看网页容易误判成失败）。两个关键设计：
+- **签到验证码兜底**：平台 2026-11-01 起在签到接口启用了 **Cap.js** 验证，
+  直接调用 API 一定被拒（HTTP 400 `code 40000`）。它**不是滑块也不是图形码**：浏览器
+  在后台跑一段 WASM 工作量计算，同时执行服务器下发的**环境指纹探针**（15 项指标，
+  外加 `Function.prototype.toString`、`hasFocus` 等自动化痕迹检测），服务器认可后
+  才发票。所以你**看不到任何验证码画面**，弹窗只是为了让浏览器"像个真人在用"。
+  脚本的做法是自动降级为 `sign-via-browser.js`：打开真实页面、点击真实签到按钮，
+  让网站自己的验证流程跑完。**成功与否以 `/api/task-award/sign-status` 为准**
+  （解算可能比页面上的提示文字更久，只看网页容易误判成失败）。两个关键设计：
   - **令牌注入**：把 `config.json` 里的令牌用 CDP 在页面脚本运行前写进
-    `localStorage.auth`，所以不依赖“哪个地址恰好还留着浏览器登录态”。平台在两个地址
-    之间搬家登录态时兜底照常工作；注入有主机名白名单，绝不会写到统一门户 IdP 等第三方页面上。
-  - **无头只短试、快速转可见窗口**：实测 Cap.js 在无头模式几乎解不出来（点到按钮后
-    一直不过），可见窗口通常 10～20 秒就过。所以无头只给 15 秒解算预算，不行立刻改用
-    可见窗口重试，不会再让你干等一两分钟。
+    `localStorage.auth`，所以不依赖“哪个地址恰好还留着浏览器登录态”；注入有主机名
+    白名单，绝不会写到统一门户 IdP 等第三方页面上。
+  - **直接开可见窗口（不再先试无头）**：实测无头 Chrome 一定会被指纹探针拒掉
+    （服务器返回 `automated_browser_detected`），伪造屏幕分辨率、改设备指标、
+    `--disable-blink-features=AutomationControlled` 都无法绕过。以前“先无头 15 秒
+    再开窗口”等于每次白烧 22 秒，现在直接开窗口，兜底全程约 **8～20 秒**。
+    需要无头做管道测试时，手动加 `--headless`（或 PS 侧 `-Headless`）即可。
   兜底每一步都会实时写进 `signin.log`（`browser: sign button clicked...`），不再是
+  “憋一分钟才出结果”。
   “憋一分钟才出结果”。
 
 ## 关于平台访问地址（重要）
@@ -108,7 +114,7 @@ GET /api/task-award/sign-status
 
 - 签到成功：`今日签到成功，获得 N 积分，当前余额 … 积分`
 - 当天已签：`今日已签到，已获 N 积分，当前余额 … 积分`
-- 遇到验证码：`签到遇到平台验证码，正在自动完成；若弹出浏览器窗口请保持打开，约需 20 秒`
+- 遇到平台验证：`签到遇到平台验证，正在自动完成（会弹出浏览器窗口，请保持打开，约需 10~20 秒）`
 - 平台地址迁移：`平台访问地址已切换为 …`
 - 失败：`自动签到失败：<中文原因>`（例如“平台不认这个登录令牌，需要重新扫码”）
 - `-Status` 模式不弹通知；`-NoToast` 全局关闭通知
@@ -134,12 +140,12 @@ GET /api/task-award/sign-status
 | `session expired: … must be confirmed once` | SSO 会话失效 | 双击 `login-once.cmd` 重新扫码 |
 | `renewal failed (exit 3): cdp-unreachable` | 专用 Chrome 被占用 | 关掉残留的专用 Chrome 窗口后重试 |
 | `sign-status request failed: …` | 网络/服务异常 | 稍后自动重试（计划任务只跑一次，可手动 `run-signin.cmd` 补签） |
-| `sign request blocked by captcha (code 40000)` | 平台验证码兜底已启动 | 正常；无头最多约 20 秒（含点按钮），随后自动开可见窗口 |
+| `sign request blocked by captcha (code 40000)` | 平台验证兜底已启动 | 正常；会弹出 Chrome 窗口，约 8～20 秒自动完成并关闭 |
 | `browser: sign button clicked, waiting for the site captcha` | 已点到签到按钮，验证码正在解 | 正常，等通知 |
 | `browser sign: already signed today.` | 兜底时当天已被签到 | 无 |
 | `"error":"redirected-to-login"` | 平台不认这个令牌（两个地址都被踢回登录页） | 双击 `login-once.cmd` 重新扫码 |
 | `"error":"no-sign-button"` | 页面改版，找不到签到按钮 | 看同一行 `diag.buttons` 的实际按钮文字，据此调整匹配规则 |
-| `"error":"captcha-not-solved-in-…s"` | 验证码没解出 | 稍后手动打开平台点一次签到；频繁出现再反馈 |
+| `"error":"captcha-not-solved-in-…s"` | 平台验证未在限时内通过 | 保持窗口打开别手动关；仍失败就稍后手动签到一次 |
 | `… is unreachable and … answers - switched the API address to …` | 平台地址迁移，工具已自动跟随并写回 config.json | 无 |
 
 ## 文件结构

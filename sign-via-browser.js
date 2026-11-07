@@ -1,10 +1,12 @@
 /*
  * sign-via-browser.js - fallback sign-in for aimarket.hncig.cn.
  *
- * Since 2026-11-01 the platform puts a Cap.js proof-of-work captcha on
- * POST /api/task-award/sign, so a bare API call comes back HTTP 400 code 40000.
- * Rather than reimplement the solver, this opens the real page in Chrome and
- * clicks the real sign-in button, so the site runs its own captcha flow.
+ * Since 2026-11-01 the platform puts a Cap.js captcha on POST
+ * /api/task-award/sign, so a bare API call comes back HTTP 400 code 40000. Cap.js
+ * is not a picture puzzle: the browser silently runs a WASM proof-of-work, and a
+ * server-supplied fingerprint probe decides whether the browser looks human.
+ * Rather than reimplement that, this opens the real page in Chrome and clicks the
+ * real sign-in button, so the site runs its own captcha flow.
  *
  * Success is decided by the sign-status API (queried here in Node with the
  * token from config.json), not by scraping the page: the WASM solve can outlast
@@ -18,8 +20,9 @@
  *      "the right one" in config.json.
  *
  * Usage:
- *   node sign-via-browser.js                 # headless, silent
- *   node sign-via-browser.js --visible       # show the Chrome window
+ *   node sign-via-browser.js                 # visible Chrome window (the default)
+ *   node sign-via-browser.js --headless      # opt in to headless; kept for tests,
+ *                                            # Cap.js blocks it (see below)
  *   node sign-via-browser.js --wait 120      # solve budget per attempt (s)
  *   node sign-via-browser.js --click 25      # button-search budget per attempt (s)
  *   node sign-via-browser.js --skip-precheck # force the browser path (testing)
@@ -49,15 +52,23 @@ function argValue(f, dflt) {
   return dflt;
 }
 
-const visible = hasFlag("--visible");
+// Cap.js makes the browser run a server-supplied fingerprint probe in a
+// sandboxed iframe. Headless Chrome fails that probe with
+// "automated_browser_detected" however the environment is faked - verified on
+// 2026-11-07 that CDP device-metrics override, --force-device-scale-factor plus
+// a real --window-size, and --disable-blink-features=AutomationControlled all
+// still get blocked, while a real window solves in ~4s. So a window is the
+// default and headless only exists for testing the plumbing quickly.
+const headless = hasFlag("--headless");
+const visible = !headless;
 // --skip-precheck forces the browser path even when the day is already signed,
 // so the plumbing (Chrome + CDP + injection + button scan) can be tested
 // without signing.
 const skipPre = hasFlag("--skip-precheck");
-// Headless click works, but on 11-02/04/05/06 Cap.js never solved in headless
-// even with a 60s budget, while a visible window solved in 8-20s. So headless
-// gets only a token budget: enough for the occasional easy solve, short enough
-// that the window appears quickly when it really is needed.
+// A window solves the challenge in 4-20s; 90s is generous headroom for a slow
+// machine or a cold Chrome start. Headless keeps a token budget purely so
+// `--headless` test runs fail fast instead of hanging on a captcha that can
+// never pass.
 const waitSec = Number(argValue('--wait', visible ? 90 : 15));
 // How long to look for the button on one origin before trying the next.
 const clickSec = Number(argValue('--click', visible ? 30 : 20));
@@ -254,7 +265,7 @@ async function waitJson(url, tries) {
     "--window-size=1200,900",
     "about:blank"
   ];
-  if (!visible) launchArgs.unshift("--headless=new");
+  if (headless) launchArgs.unshift("--headless=new");
 
   const chrome = spawn(chromePath, launchArgs, { stdio: "ignore" });
   let exited = false;
@@ -307,11 +318,11 @@ async function waitJson(url, tries) {
   const siteHost = (() => { try { return new URL(baseUrl).hostname; } catch { return ""; } })();
   await call("Page.addScriptToEvaluateOnNewDocument", { source: injectScript(token, siteHost) });
 
-  // Find the button on one origin and click it. We deliberately do NOT wait for
-  // the captcha here: Cap.js mostly refuses to solve in headless (every recent
-  // day solved only once a window was shown), so burning the full budget per
-  // origin just delays the visible attempt. First origin whose page is signed
-  // in and whose button we can click wins.
+  // Find the button on one origin and click it, but do NOT wait for the captcha
+  // inside this loop: the solve takes several seconds, so waiting per origin
+  // would multiply a dead wait across both addresses. The first origin whose
+  // page is signed in and whose button we can click wins, and one shared solve
+  // budget is spent from there.
   async function clickOn(origin) {
     await call("Page.navigate", { url: origin + "/" });
     const deadline = Date.now() + clickSec * 1000;
@@ -377,7 +388,7 @@ async function waitJson(url, tries) {
     await cleanup(2, {
       ok: false,
       error: "captcha-not-solved-in-" + waitSec + "s",
-      note: visible ? "shown a window and still unsigned" : "headless rarely solves this captcha; retry with --visible",
+      note: visible ? "shown a window and still unsigned" : "headless is blocked by the Cap.js fingerprint probe; run without --headless",
       origin: clicked.origin,
       tried: attempts.map(a => ({ origin: a.origin, kind: a.kind })),
       diag: await evalJs(DIAG)

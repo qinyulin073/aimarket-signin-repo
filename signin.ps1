@@ -57,7 +57,9 @@ function Explain-BrowserError($j) {
     'sso-start-failed'           { return '平台统一登录入口没有响应' }
     default {
       if ($j.error -like 'captcha-not-solved*') {
-        return '验证码在自动窗口里也没解出（' + $j.error + '），可稍后手动签到一次'
+        # $j.note already says which mode failed (window vs the headless test
+        # mode), so keep this sentence itself free of any assumption about it.
+        return '平台验证未在限时内通过（' + $j.error + '），可稍后手动签到一次'
       }
       if ($j.error -like 'still-unsigned*') { return '点到了签到按钮，但验证码未在限时内完成' }
       return ('兜底失败：' + $j.error)
@@ -310,9 +312,10 @@ function Invoke-SignFlow {
       # platform enabled Cap.js captcha on the sign endpoint (since 2026-11-01);
       # fall back to clicking the real button in Chrome so the site's own captcha flow runs
       Write-Log 'sign request blocked by captcha (code 40000), trying browser sign-in...'
-      Show-Toast -Title '元筑AI集市自动签到' -Message '签到遇到平台验证码，正在自动完成；若弹出浏览器窗口请保持打开，约需 20 秒'
-      $bs = Invoke-BrowserSign -visible $false
-      if (-not $bs) { $bs = Invoke-BrowserSign -visible $true }
+      Show-Toast -Title '元筑AI集市自动签到' -Message '签到遇到平台验证，正在自动完成（会弹出浏览器窗口，请保持打开，约需 10~20 秒）'
+      # One window attempt: Cap.js blocks headless Chrome by design, so a headless
+      # try first only added ~22s of guaranteed failure before the window opened.
+      $bs = Invoke-BrowserSign
       if ($bs -and $bs.ok) {
         if ($bs.already) {
           Write-Log 'browser sign: already signed today.'
@@ -369,13 +372,15 @@ function Get-Balance([string]$t) {
 }
 
 function Invoke-BrowserSign {
-  param([bool]$visible = $false)
+  # Window by default: the platform captcha (Cap.js) rejects headless Chrome via
+  # a fingerprint probe, so headless is only a test mode now.
+  param([switch]$Headless)
   $node = Find-Node
   if (-not $node) { Write-Log 'browser sign skipped: node.exe not found.'; return $null }
   $js = Join-Path $PSScriptRoot 'sign-via-browser.js'
   if (-not (Test-Path -LiteralPath $js)) { Write-Log 'sign-via-browser.js missing.'; return $null }
-  if ($visible) { $wargs = @('--visible'); Write-Log 'opening a browser window for the captcha (visible windows solve it, usually under 20 seconds)...' }
-  else { $wargs = @(); Write-Log 'solving the captcha in a background browser (no window, up to ~20 seconds)...' }
+  if ($Headless) { $wargs = @('--headless'); Write-Log 'solving the captcha in a background browser (test mode, Cap.js normally rejects this)...' }
+  else { $wargs = @(); Write-Log 'opening a browser window to pass the platform captcha (usually under 20 seconds)...' }
 
   # Stream Chrome's progress lines instead of collecting them until the child
   # exits: previously the log stayed silent for a full minute, which looked like
